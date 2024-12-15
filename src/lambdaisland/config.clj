@@ -1,9 +1,14 @@
 (ns lambdaisland.config
+  (:refer-clojure :exclude [get])
   (:require
    [aero.core :as aero]
+   [clojure.core :as c]
    [clojure.java.io :as io]
    [clojure.string :as str]
    [lambdaisland.data-printers :as printers]))
+
+(defn- env-case [s]
+  (-> s str/upper-case (str/replace #"[-/]" "_")))
 
 (defn key->env-var
   "Take the key used to identify a setting or secret, and turn it into a string
@@ -16,13 +21,15 @@
   - if the ident is qualified (has a namespace), two underscores are used to
     separate name and namespace"
   [prefix k]
-  (str (str/upper-case (str/replace prefix #"/" "_"))
-       (if (string? k)
-         k
-         (str (when (qualified-ident? k)
-                (str (str/upper-case (munge (namespace k)))
-                     "__"))
-              (str/upper-case (munge (name k)))))))
+  (str
+   (when prefix
+     (str (env-case prefix) "__"))
+   (if (string? k)
+     k
+     (str (when (qualified-ident? k)
+            (str (str/upper-case (munge (namespace k)))
+                 "__"))
+          (str/upper-case (munge (name k)))))))
 
 (defn env-key
   "The current environment name, as a keyword, for instance `:dev`, `:prod`, or `:test`
@@ -65,46 +72,43 @@
       :else
       path))
   (-reload [this]
-    (reset! cache (aero/read-config path opts)))
-  clojure.lang.IMeta
-  (meta [this]
-    {:path path
-     :opts opts}))
+    (reset! cache (aero/read-config path opts))))
 
 (deftype EnvProvider [prefix]
   ConfigProvider
   (-value [this k] (System/getenv (key->env-var prefix k)))
-  (-source [this k] (str "(System/getenv " (pr-str (key->env-var prefix k)) ")"))
-  (-reload [this])
-  clojure.lang.IMeta
-  (meta [this]
-    {:prefix prefix}))
+  (-source [this k] (str "$" (key->env-var prefix k) " environment variable"))
+  (-reload [this]))
 
-(defn prop-key [prefix k]
-  (str/replace (str prefix "." (subs (str k) 1)) #"/" "."))
+(defn- property-key [prefix k]
+  (str (when prefix
+         (str prefix "."))
+       (str/replace (subs (str k) 1) #"/" ".")))
 
 (deftype PropertiesProvider [prefix]
   ConfigProvider
   (-value [this k] (System/getProperty (prop-key prefix k)))
-  (-source [this k]  (str "(System/getProperty " (pr-str (prop-key prefix k)) ")"))
-  (-reload [this])
-  clojure.lang.IMeta
-  (meta [this]
-    {:prefix prefix}))
+  (-source [this k] (str (property-key prefix k) " java system property"))
+  (-reload [this]))
 
 (doseq [c [AeroProvider EnvProvider PropertiesProvider]]
   (printers/register-print c (.getName c) meta)
   (printers/register-pprint c (.getName c) meta))
 
-(defn new-config [providers]
-  {:providers (remove nil? providers)
+(defn new-config [env providers]
+  {:env env
+   :providers (remove nil? providers)
    :values (atom {})})
 
-(defn create [{:keys [prefix env-vars java-system-props local-config xdg-config] :as opts
+(defn create [{:keys [prefix env-vars java-system-props local-config xdg-config
+                      prefix-env prefix-props]
+               :as   opts
                :or   {env-vars          true
                       java-system-props true
                       local-config      true
-                      xdg-config        true}}]
+                      xdg-config        true
+                      prefix-env        true
+                      prefix-props      true}}]
   (let [env          (env-key opts)
         config-edn   (io/resource (str prefix "/config.edn"))
         env-edn      (io/resource (str prefix "/" (name env) ".edn"))
@@ -115,66 +119,51 @@
                           (io/file (System/getProperty "user.home") ".config"))
                       (str prefix ".edn"))]
     (new-config
-     [(when config-edn
-        (->AeroProvider config-edn aero-opts (atom nil)))
-      (when env-edn
-        (->AeroProvider env-edn aero-opts (atom nil) ))
+     env
+     [(when env-vars
+        (->EnvProvider (when prefix-env prefix)))
+      (when (and local-config (.exists config-local))
+        (->AeroProvider config-local aero-opts (atom nil)))
       (when (and xdg-config (.exists xdg-path))
         (->AeroProvider xdg-path aero-opts (atom nil)))
       (when java-system-props
-        (->PropertiesProvider prefix))
-      (when (and local-config (.exists config-local))
-        (->AeroProvider config-local aero-opts (atom nil)))
-      (when env-vars
-        (->EnvProvider prefix))])))
+        (->PropertiesProvider (when prefix-props prefix)))
+      (when env-edn
+        (->AeroProvider env-edn aero-opts (atom nil)))
+      (when config-edn
+        (->AeroProvider config-edn aero-opts (atom nil)))])))
 
-(defn value
-  ([config k]
-   (value config k nil))
-  ([{:keys [providers values] :as config} k fallback]
-   (let [vs @(:values config)]
-     (if (contains? vs k)
-       (get-in vs [k :val])
-       (let [[p v] (first (filter (comp some? second) (map (fn [p] [p (-value p k)]) providers)))]
-         (swap! values assoc k {:val v :source p})
-         (if (some? v)
-           v
-           fallback))))))
+(defn get-entry [{:keys [providers values] :as config} k]
+  (let [values (swap! values
+                      (fn [m]
+                        (if (contains? m k)
+                          m
+                          (reduce
+                           (fn [m p]
+                             (if-let [v (-value p k)]
+                               (reduced (assoc m k {:val v
+                                                    :provider p
+                                                    :source (-source p k)}))
+                               m))
+                           m
+                           providers))))]
+    (c/get values k)))
 
-(defn source [{:keys [providers values] :as config} k]
-  (let [vs @(:values config)]
-    (if (contains? vs k)
-      (-source (get-in vs [k :source]) k)
-      (let [[p v] (first (filter (comp some? second) (map (fn [p] [p (-value p k)]) providers)))]
-        (swap! values assoc k {:val v :source p})
-        (-source p v)))))
+(defn get [config k]
+  (:val (get-entry config k)))
 
-(defn sources [config]
-  (into {}
-        (map (fn [[k {v :val p :source}]]
-               [k (-source p k)]))
-        @(:values config)))
+(defn source [config k]
+  (:source (get-entry config k)))
+
+(defn entries [config]
+  @(:values config))
 
 (defn values [config]
-  (into {}
-        (map (fn [[k {v :val}]]
-               [k v]))
-        @(:values config)))
+  (update-vals (entries config) :val))
 
-(comment
-  (def c (create {:prefix "foo/bar"}))
+(defn sources [config]
+  (update-vals (entries config) :source))
 
-  (value c :test)
-  (value c :baz)
-
-  (sources c)
-  (values c)
-
-  (System/getProperty
-   (prop-key "foo/bar" :baz))
-
-  (-value
-   (->PropertiesProvider "foo/bar")
-   :baz)
-
-  (System/setProperty "foo.bar.baz" "bsq"))
+(defn reload! [config]
+  (run! -reload (:providers config))
+  (reset! (:values config)))

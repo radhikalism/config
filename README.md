@@ -26,7 +26,103 @@ or add the following to your `project.clj` ([Leiningen](https://leiningen.org/))
 
 ## Rationale
 
+`lambdaisland/config` implements a pattern we've settled on through doing lots
+of different Clojure projects, about how to handle configuration, in particular
+the kind of things that differ between environments (dev, test, staging, prod),
+and that you might want to set or override on multiple levels.
+
+It is highly flexible in how you configure the sources that are checked, but has
+opinionated defaults, and allows plugging in custom "providers", for instance
+for checking a secret store like Hashicorp Vault or Google Secret Manager.
+
 ## Usage
+
+### Illustrative Example
+
+```clj
+(def config
+  (config/create {:prefix "my-app"
+                  :env :dev}))
+
+(config/get config :http/port) ;;=> 8080
+```
+
+This will check, in order, until it's found a value:
+
+- The `$HTTP__PORT` environment variable
+- `config.local.edn` in the JVM's CWD
+- `$XDG_CONFIG_HOME/my-app.edn`
+- The `my-app.http.port` Java system property (`System/getProperty`)
+- `my-app/dev.edn` on the CLASSPATH (e.g. under `resources`)
+- `my-app/config.edn` on the CLASSPATH
+
+To know where a given setting came from, use `config/source`
+
+```clj
+(config/source config :http/port)
+;;=> `"$HTTP__PORT environment variable"
+```
+
+### Detailed Usage
+
+`lambdaisland/config` is based on the `ConfigProvider` protocol.
+
+```clj
+(defprotocol ConfigProvider
+  (-value [this k])
+  (-source [this k])
+  (-reload [this]))
+```
+
+The result of `config/create` is a three-element map. The "environment" name, a
+sequence of config providers, and an atom which acts as a cache of values
+already accessed.
+
+```clj
+{:env :prod
+ :providers [,,,<implement ConfigProvider protocol>,,,]
+ :values (atom {:http/port {:val 8080 :source "$HTTP__PORT environment variable}})
+```
+
+`:env` can be explicitly passed in, otherwise we check the `PREFIX_ENV` (e.g.
+`MY_APP_ENV`) env var, or the `prefix.env` System property (`my-app.env`). If
+neither is set and the `CI` env var is true, then we default to `:test`, if not
+we fall back to `:dev`.
+
+`create` can take a number of other options besides `:env` and `:prefix`.
+
+- `:env-vars false` - Don't check environemnt variables
+- `:prefix-env true` - Include the prefix when checking environment variables,
+  e.g. `MY_APP__HTTP__PORT` instead of `HTTP_PORT` 
+- `:java-system-props false` - Don't check Java system properties
+- `:local-config false` - Don't check `config.local.edn`
+- `:xdg-config false` - Don't check `XDG_CONFIG_HOME` (default: `~/.config`)
+
+If you want a different precedence order, or want to inject your own
+`ConfigProvider`, then don't use `create`, but construct your own config map as
+you see fit.
+
+### Idiomatic Usage
+
+The general idea is:
+
+- Create a `resources/<prefix>/config.edn` file with your base config. Whenever
+  adding a new config key it's a good idea to add a sensible default here
+- Create a `resources/<prefix>/<env>.edn` for each environment. This way you can
+  check in sensible `dev.edn` settings, and separate `prod.edn` settings.
+- During development, create `config.local.edn` so you can easily change
+  settings locally. Add `*.local.*` to `.gitignore`.
+- When deploying/running in specific settings, use whatever makes most sense in
+  that context to customize the deployment. If you're running through some cloud
+  or lambda provider env vars might be your main option. If you control the
+  `clojure` or `java` command line invocation, then system props might be handy.
+  If you want a file on the filesystem you can look at and tweak, then the
+  `XDG_CONFIG_HOME` convention is useful.
+  
+At the end of the boot process it can be a good idea to print/log
+`config/sources` or `config/entries` (perhaps with
+`clojure.pprint/print-table`), so when you go in to debug things you have a
+record of where various configuration items are coming from.
 
 <!-- opencollective -->
 ## Lambda Island Open Source
