@@ -3,11 +3,6 @@
    [lambdaisland.config :as config]))
 
 (def config
-  (config/create {:prefix "my-app"
-                  :prefix-env true}))
+  (config/create {:prefix "my-app"}))
 
-(:values config)
-
-()
-
-(config/source config :bar/baz)
+(config/get config :http/port)

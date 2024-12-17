@@ -62,7 +62,7 @@
   (-value [this k]
     (when-not @cache
       (reset! cache (aero/read-config path opts)))
-    (get @cache k))
+    (c/get @cache k))
   (-source [this k]
     (cond
       (instance? java.io.File path)
@@ -87,7 +87,7 @@
 
 (deftype PropertiesProvider [prefix]
   ConfigProvider
-  (-value [this k] (System/getProperty (prop-key prefix k)))
+  (-value [this k] (System/getProperty (property-key prefix k)))
   (-source [this k] (str (property-key prefix k) " java system property"))
   (-reload [this]))
 
