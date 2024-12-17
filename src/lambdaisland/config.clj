@@ -166,4 +166,4 @@
 
 (defn reload! [config]
   (run! -reload (:providers config))
-  (reset! (:values config)))
+  (reset! (:values config) {}))
