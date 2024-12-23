@@ -1,10 +1,8 @@
 # Unreleased
 
-## Added
-
-## Fixed
-
 ## Changed
+
+- Make sure command line flags override other config sources
 
 # 0.2.10 (2024-12-23 / 51ef5bd)
 

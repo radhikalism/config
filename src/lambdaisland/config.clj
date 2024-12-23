@@ -43,7 +43,7 @@
   [opts]
   (or
    (:env opts)
-   (some-> (:prefix opts) (str/replace #"/" "_") str/upper-case (str "_ENV") System/getenv keyword)
+   (some-> (:prefix opts) (str/replace #"/" "_") str/upper-case (str "__ENV") System/getenv keyword)
    (some-> (:prefix opts) (str/replace #"/" ".") (str ".env") System/getProperty keyword)
    (when (= "true" (System/getenv "CI")) :test)
    :dev))
@@ -91,16 +91,16 @@
   (-source [this k] (str (property-key prefix k) " java system property"))
   (-reload [this]))
 
-(deftype MapProvider [m]
+(deftype MapProvider [m desc]
   ConfigProvider
   (-value [this k] (c/get m k))
-  (-source [this k] (str k " map lookup"))
+  (-source [this k] (str k " " desc))
   (-reload [this]))
 
-(deftype DerefMapProvider [m]
+(deftype DerefMapProvider [m desc]
   ConfigProvider
   (-value [this k] (c/get @m k))
-  (-source [this k] (str k " deref map lookup"))
+  (-source [this k] (str k " " desc))
   (-reload [this]))
 
 (doseq [c [AeroProvider

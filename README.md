@@ -8,6 +8,20 @@ Configuration library
 
 ## Features
 
+- Merge multiple configuration sources
+  - EDN file
+  - Environment variables
+  - Java system properties
+  - Static map
+  - Map inside a var or atom
+  - [lambdaisland.cli](https://github.com/lambdaisland/cli) command line flags
+- ConfigProvider protocol, easy to plug in additional sources
+- Unopinionated base API
+- Support for a specific opinionated convention which is encouraged
+- Environment-specific configuration (dev, prod, staging, etc)
+- Provenance tracking (know where config values came from)
+- Support for hooking up reloading
+
 <!-- installation -->
 ## Installation
 
@@ -35,13 +49,47 @@ It is highly flexible in how you configure the sources that are checked, but has
 opinionated defaults, and allows plugging in custom "providers", for instance
 for checking a secret store like Hashicorp Vault or Google Secret Manager.
 
+## Gaiwan/Lambda Island Convention
+
+This is how we handle configuration, and the approach we encourage others to
+adopt. We'll get into the nitty gritty of the library and how to do other things
+with it down below.
+
+When creating a new Clojure application, we pick a short symbolic name for it,
+for this example we'll use `app-name`. `lambdaisland/config` refers to this as
+the "prefix" because it's used to prefix various things.
+
+We then create a base configuration in `resources/app-name/config.edn`. We
+generally use namespaced keywords in there, and try to have a sensible default
+for every configuration key that is used, maybe with a comment about what it
+does.
+
+Then we create per-environment config files: `resources/app-name/dev.edn`,
+`resources/app-name/prod.edn`, etc. We generally have at least dev, prod, test,
+and likely also staging. Any environment-specific config that isn't a secret
+should go in there and get checked in, so that running the app, either in dev or
+prod or test mode, "just works", and new developers can get onboarded quickly.
+
+Finally each person creates a `config.local.edn` at the project root. This file
+does not get checked in (we gitigore `*.local.*`). Here developers can easily
+make local overrides, or configure secrets.
+
+For dev work this is usually all you need, but when it comes time to deploying
+or releasing the story varies. If you are running in a cloud environment often
+the easiest (sometimes the only) option you have to do per-instance
+configuration is through environment variables. Or sometimes the thing you have
+the most control over is the command line invocation, in which case Java system
+properties are convenient. If you're releasing to the public it might make sense
+to follow XDG conventions and read a `~/.config/app-name.edn` file.
+`lambdaisland/config` provides all of these mechanisms out of the box.
+
 ## Usage
 
 ### Illustrative Example
 
 ```clj
 (def config
-  (config/create {:prefix "my-app"
+  (config/create {:prefix "app-name"
                   :env :dev}))
 
 (config/get config :http/port) ;;=> 8080
@@ -49,12 +97,12 @@ for checking a secret store like Hashicorp Vault or Google Secret Manager.
 
 This will check, in order, until it's found a value:
 
-- The `$HTTP__PORT` environment variable
+- The `$APP_NAME__HTTP__PORT` environment variable
 - `config.local.edn` in the JVM's CWD
-- `$XDG_CONFIG_HOME/my-app.edn`
-- The `my-app.http.port` Java system property (`System/getProperty`)
-- `my-app/dev.edn` on the CLASSPATH (e.g. under `resources`)
-- `my-app/config.edn` on the CLASSPATH
+- `$XDG_CONFIG_HOME/app-name.edn`
+- The `app-name.http.port` Java system property (`System/getProperty`)
+- `app-name/dev.edn` on the CLASSPATH (e.g. under `resources`)
+- `app-name/config.edn` on the CLASSPATH
 
 To know where a given setting came from, use `config/source`
 
@@ -62,6 +110,17 @@ To know where a given setting came from, use `config/source`
 (config/source config :http/port)
 ;;=> `"$HTTP__PORT environment variable"
 ```
+
+### Determining `:env`
+
+You don't have to provide an `:env` key, if not it'll be determined by the
+`APP_NAME__ENV` environment variable, or the `app-name.env` system property. If
+neither is set and `CI=true` (an env var set by most CI providers) then env will
+be `test`. If none of these apply then the default is `dev`.
+
+If you build a Docker image you might want to bake in `-Japp-name.env=prod`, so
+it doesn't try to start in dev mode. You can still use the env var to override
+this for instance in a staging environment.
 
 ### Detailed Usage
 
@@ -84,8 +143,8 @@ already accessed.
  :values (atom {:http/port {:val 8080 :source "$HTTP__PORT environment variable}})
 ```
 
-`:env` can be explicitly passed in, otherwise we check the `PREFIX_ENV` (e.g.
-`MY_APP_ENV`) env var, or the `prefix.env` System property (`my-app.env`). If
+`:env` can be explicitly passed in, otherwise we check the `PREFIX__ENV` (e.g.
+`APP_NAME__ENV`) env var, or the `prefix.env` System property (`app-name.env`). If
 neither is set and the `CI` env var is true, then we default to `:test`, if not
 we fall back to `:dev`.
 
@@ -93,18 +152,62 @@ we fall back to `:dev`.
 
 - `:env-vars false` - Don't check environemnt variables
 - `:prefix-env true` - Include the prefix when checking environment variables,
-  e.g. `MY_APP__HTTP__PORT` instead of `HTTP_PORT` 
+  e.g. `APP_NAME__HTTP__PORT` instead of `HTTP_PORT` 
 - `:java-system-props false` - Don't check Java system properties
 - `:local-config false` - Don't check `config.local.edn`
 - `:xdg-config false` - Don't check `XDG_CONFIG_HOME` (default: `~/.config`)
 
 If you want a different precedence order, or want to inject your own
-`ConfigProvider`, then don't use `create`, but construct your own config map as
-you see fit.
+`ConfigProvider`, then either don't use `create` and construct your own config
+map as you see fit, or do use `create`, but subsequently update the `:providers`
+list.
+
+### `lambdaisland/cli` integration
+
+Apart from the options listed, you might also want to provide command line flags
+to set specific options. For this you can use
+[com.lambdaisland/cli](https://github.com/lambdisland/cli), and
+`lambdaisland.config.cli/add-provider`.
+
+Here's an illustrative example. Note that this relies on the dynamic var
+`lambdaisland.cli/*opts*` which gets bound while the command handler is being
+invoked. For simple use cases this is fine. In more complex (in particular
+multi-threaded) scenarios you can pass a var or other derefable to
+`add-provider` explicitly.
+
+```clj
+(ns app-name
+  (:require
+   [lambdaisland.cli :as cli]
+   [lambdaisland.config :as config]
+   [lambdaisland.config.cli :as config-cli]))
+
+(def cfg
+  (-> (config/create {:prefix "app-name"})
+      config-cli/add-provider))
+
+(defn inspect-cmd
+  "Inspect the `opts` coming from lambdaisland/cli"
+  [opts]
+  (println (str "Port=" (config/get cfg :http/port) " read from " (config/source cfg :http/port)))
+  (prn opts))
+
+(def cmdspec
+  {:name "app-name"
+   :doc "Illustrate cli+config usage"
+   :commands
+   ["inspect" #'inspect-cmd]
+   :flags
+   ["--port <port>" {:key :http/port
+                     :doc "HTTP port to listen on"}]})
+
+(defn -main [& argv]
+  (cli/dispatch* cmdspec argv))
+```
 
 ### Idiomatic Usage
 
-The general idea is:
+In summary, the general idea is:
 
 - Create a `resources/<prefix>/config.edn` file with your base config. Whenever
   adding a new config key it's a good idea to add a sensible default here
