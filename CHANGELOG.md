@@ -1,4 +1,4 @@
-# Unreleased
+# 0.2.10 (2024-12-23 / 51ef5bd)
 
 ## Added
 
