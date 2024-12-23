@@ -91,7 +91,23 @@
   (-source [this k] (str (property-key prefix k) " java system property"))
   (-reload [this]))
 
-(doseq [c [AeroProvider EnvProvider PropertiesProvider]]
+(deftype MapProvider [m]
+  ConfigProvider
+  (-value [this k] (c/get m k))
+  (-source [this k] (str k " map lookup"))
+  (-reload [this]))
+
+(deftype DerefMapProvider [m]
+  ConfigProvider
+  (-value [this k] (c/get @m k))
+  (-source [this k] (str k " deref map lookup"))
+  (-reload [this]))
+
+(doseq [c [AeroProvider
+           EnvProvider
+           PropertiesProvider
+           MapProvider
+           DerefMapProvider]]
   (printers/register-print c (.getName c) meta)
   (printers/register-pprint c (.getName c) meta))
 
